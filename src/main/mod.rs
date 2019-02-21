@@ -8,8 +8,10 @@
 // Software.
 
 pub use self::active_connection::{ActiveConnection, INACTIVITY_TIMEOUT_MS};
-pub use self::bootstrap::Bootstrap;
-pub use self::config_handler::{Config, DevConfig};
+#[cfg(test)]
+pub use self::bootstrap::Cache as BootstrapCache;
+pub use self::bootstrap::{Bootstrap, CacheConfig as BootstrapCacheConfig};
+pub use self::config_handler::Config;
 pub use self::config_refresher::ConfigRefresher;
 pub use self::connect::Connect;
 pub use self::connection_candidate::ConnectionCandidate;
@@ -18,13 +20,9 @@ pub use self::error::CrustError;
 pub use self::event::Event;
 pub use self::service::Service;
 pub use self::types::{
-    ConfigWrapper, ConnectionId, ConnectionInfoResult, PrivConnectionInfo, PubConnectionInfo,
+    ConfigWrapper, ConnectionId, ConnectionInfoResult, CrustData, EventLoop, EventLoopCore,
+    EventToken, GetGlobalListenerAddrs, PrivConnectionInfo, PubConnectionInfo,
 };
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-pub type ConnectionMap<UID> = Arc<Mutex<HashMap<UID, ConnectionId>>>;
-pub type CrustConfig = Arc<Mutex<ConfigWrapper>>;
 
 mod active_connection;
 mod bootstrap;
@@ -39,3 +37,15 @@ mod service;
 mod types;
 
 pub use self::config_handler::read_config_file;
+
+use safe_crypto::{PublicEncryptKey, PublicSignKey};
+
+/// Used to identify unique peers.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub struct PeerId {
+    /// Public signing key is not used by Crust itself, but it is passed to Crust users when
+    /// new peers are found.
+    pub pub_sign_key: PublicSignKey,
+    /// Crust uses this field to actually identify different peers.
+    pub pub_enc_key: PublicEncryptKey,
+}

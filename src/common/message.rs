@@ -7,18 +7,30 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::{self, ExternalReachability, NameHash};
+use crate::common::{BootstrapperRole, NameHash};
+use crate::PeerId;
+use safe_crypto::PublicEncryptKey;
+use std::collections::HashSet;
+use std::net::SocketAddr;
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Message<UID> {
+pub enum Message {
     Heartbeat,
-    BootstrapRequest(UID, NameHash, ExternalReachability),
-    BootstrapGranted(UID),
+    /// Carries a list of our listener addresses in case remote peer wants to check our
+    /// external reachability.
+    BootstrapRequest(PeerId, NameHash, BootstrapperRole),
+    /// Connection listener sends this message to the bootstrapee together with the peer ID that
+    /// runs connection listener.
+    BootstrapGranted(PeerId),
     BootstrapDenied(BootstrapDenyReason),
-    EchoAddrReq,
-    EchoAddrResp(common::SocketAddr),
+    EchoAddrReq(PublicEncryptKey),
+    EchoAddrResp(SocketAddr),
     ChooseConnection,
-    Connect(UID, NameHash),
+    /// Send this message to initiate connection with remote peer. This message carries our ID,
+    /// network name hash ad list of public IP:port pairs.
+    ConnectRequest(PeerId, NameHash, HashSet<SocketAddr>),
+    /// Response of accepted connection that carries remote peer's ID and network name hash.
+    ConnectResponse(PeerId, NameHash),
     Data(Vec<u8>),
 }
 

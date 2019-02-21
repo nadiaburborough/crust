@@ -7,11 +7,20 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::Uid;
+use crate::common::PeerInfo;
+use crate::main::{
+    BootstrapCache, BootstrapCacheConfig, Config, CrustData, Event, EventLoopCore, Service,
+};
+use crate::PeerId;
 use crossbeam;
 use maidsafe_utilities::event_sender::{MaidSafeEventCategory, MaidSafeObserver};
-use main::{Config, Event};
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use mio_extras::channel::channel;
+use mio_extras::timer;
+use rand;
+use safe_crypto::{gen_encrypt_keypair, gen_sign_keypair, SecretEncryptKey};
+use std::env;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -34,10 +43,18 @@ macro_rules! expect_event {
     };
 }
 
-pub type UniqueId = [u8; 20];
-impl Uid for UniqueId {}
+/// Generates random peer id.
+pub fn rand_peer_id_and_enc_sk() -> (PeerId, SecretEncryptKey) {
+    let (enc_pk, enc_sk) = gen_encrypt_keypair();
+    let (sign_pk, _sign_sk) = gen_sign_keypair();
+    let id = PeerId {
+        pub_sign_key: sign_pk,
+        pub_enc_key: enc_pk,
+    };
+    (id, enc_sk)
+}
 
-pub fn get_event_sender() -> (::CrustEventSender<UniqueId>, Receiver<Event<UniqueId>>) {
+pub fn get_event_sender() -> (crate::CrustEventSender, Receiver<Event>) {
     let (category_tx, _) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
 
@@ -50,7 +67,7 @@ pub fn get_event_sender() -> (::CrustEventSender<UniqueId>, Receiver<Event<Uniqu
 // Generate config with unique bootstrap cache name.
 pub fn gen_config() -> Config {
     let mut config = Config::default();
-    config.bootstrap_cache_name = Some(gen_bootstrap_cache_name());
+    config.bootstrap_cache.file_name = Some(bootstrap_cache_tmp_file().into());
     config
 }
 
@@ -77,11 +94,42 @@ where
     })
 }
 
-// Generate unique name for the bootstrap cache.
-fn gen_bootstrap_cache_name() -> String {
-    static COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
-    format!(
-        "test{}.bootstrap.cache",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+/// Constructs random bootstrap cache file name.
+pub fn bootstrap_cache_tmp_file() -> PathBuf {
+    let fname = format!("{:016x}.bootstrap.cache", rand::random::<u64>());
+    let mut path = env::temp_dir();
+    path.push(fname);
+    path
+}
+
+/// Creates `Core` for tests with some defaults.
+pub fn test_core(bootstrap_cache: BootstrapCache) -> EventLoopCore {
+    let (event_tx, _event_rx) = channel();
+    let timer = timer::Builder::default().build();
+    EventLoopCore::new_for_tests(0, event_tx, timer, CrustData::new(bootstrap_cache))
+}
+
+/// Bootstrap cache on tmp directory with unique file name.
+pub fn test_bootstrap_cache() -> BootstrapCache {
+    let cache_file = bootstrap_cache_tmp_file().into();
+    BootstrapCache::new(BootstrapCacheConfig {
+        file_name: Some(cache_file),
+        max_size: 100,
+        timeout: 120,
+    })
+}
+
+/// Constructs peer info with random generated public key.
+pub fn peer_info_with_rand_key(addr: SocketAddr) -> PeerInfo {
+    let (pk, _) = gen_encrypt_keypair();
+    PeerInfo::new(addr, pk)
+}
+
+/// Generates `Service` instance for testing with default configuration.
+pub fn test_service() -> (Service, Receiver<Event>) {
+    let config = gen_config();
+    let (event_tx, event_rx) = get_event_sender();
+    let (peer_id, peer_sk) = rand_peer_id_and_enc_sk();
+    let service = unwrap!(Service::with_config(event_tx, config, peer_id, peer_sk));
+    (service, event_rx)
 }

@@ -7,10 +7,7 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::CoreMessage;
 use maidsafe_utilities::serialisation::SerialisationError;
-use mio;
-use mio::timer::TimerError;
 use std::io;
 
 quick_error! {
@@ -40,23 +37,13 @@ quick_error! {
             cause(e)
             from()
         }
-        /// Timer error
-        Timer(e: TimerError) {
-            description(e.description())
-            display("Timer error: {}", e)
-            cause(e)
-            from()
-        }
         /// A zero byte socket read - means EOF
         ZeroByteRead {
             description("Read zero bytes from the socket - indicates EOF")
         }
         /// CoreMessage send error
-        CoreMsgTx(e: mio::channel::SendError<CoreMessage>) {
-            description(e.description())
-            display("CoreMessage send error: {}", e)
-            cause(e)
-            from()
+        CoreMsgTx {
+            display("CoreMessage channel was destroyed")
         }
     }
 }

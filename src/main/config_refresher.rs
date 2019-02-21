@@ -7,10 +7,10 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::{Core, CoreTimer, CrustUser, State, Uid};
-use main::{read_config_file, ActiveConnection, ConnectionMap, CrustConfig};
-use mio::timer::Timeout;
+use crate::common::{CoreTimer, CrustUser, State};
+use crate::main::{read_config_file, ActiveConnection, CrustData, EventLoopCore};
 use mio::{Poll, Token};
+use mio_extras::timer::Timeout;
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,32 +18,23 @@ use std::time::Duration;
 
 const REFRESH_INTERVAL_SEC: u64 = 30;
 
-pub struct ConfigRefresher<UID: Uid> {
+pub struct ConfigRefresher {
     token: Token,
     timer: CoreTimer,
     timeout: Timeout,
-    cm: ConnectionMap<UID>,
-    config: CrustConfig,
 }
 
-impl<UID: Uid> ConfigRefresher<UID> {
-    pub fn start(
-        core: &mut Core,
-        token: Token,
-        cm: ConnectionMap<UID>,
-        config: CrustConfig,
-    ) -> ::Res<()> {
+impl ConfigRefresher {
+    pub fn start(core: &mut EventLoopCore, token: Token) -> crate::Res<()> {
         trace!("Entered state ConfigRefresher");
 
         let timer = CoreTimer::new(token, 0);
-        let timeout = core.set_timeout(Duration::from_secs(REFRESH_INTERVAL_SEC), timer)?;
+        let timeout = core.set_timeout(Duration::from_secs(REFRESH_INTERVAL_SEC), timer);
 
         let state = Rc::new(RefCell::new(ConfigRefresher {
             token,
             timer,
             timeout,
-            cm,
-            config,
         }));
         let _ = core.insert_state(token, state);
 
@@ -51,21 +42,14 @@ impl<UID: Uid> ConfigRefresher<UID> {
     }
 }
 
-impl<UID: Uid> State for ConfigRefresher<UID> {
-    fn terminate(&mut self, core: &mut Core, _poll: &Poll) {
+impl State<CrustData> for ConfigRefresher {
+    fn terminate(&mut self, core: &mut EventLoopCore, _poll: &Poll) {
         let _ = core.cancel_timeout(&self.timeout);
         let _ = core.remove_state(self.token);
     }
 
-    fn timeout(&mut self, core: &mut Core, poll: &Poll, _timer_id: u8) {
-        self.timeout = match core.set_timeout(Duration::from_secs(REFRESH_INTERVAL_SEC), self.timer)
-        {
-            Ok(t) => t,
-            Err(e) => {
-                debug!("Config Refresher Timer Errored out: {:?}", e);
-                return self.terminate(core, poll);
-            }
-        };
+    fn timeout(&mut self, core: &mut EventLoopCore, poll: &Poll, _timer_id: u8) {
+        self.timeout = core.set_timeout(Duration::from_secs(REFRESH_INTERVAL_SEC), self.timer);
 
         let config = match read_config_file() {
             Ok(cfg) => cfg,
@@ -81,7 +65,10 @@ impl<UID: Uid> State for ConfigRefresher<UID> {
         let whitelisted_node_ips = config.whitelisted_node_ips.clone();
         let whitelisted_client_ips = config.whitelisted_client_ips.clone();
 
-        if !unwrap!(self.config.lock()).check_for_refresh_and_reset_modified(config)
+        if !core
+            .user_data_mut()
+            .config
+            .check_for_refresh_and_reset_modified(config)
             || (whitelisted_node_ips.is_none() && whitelisted_client_ips.is_none())
         {
             return;
@@ -92,8 +79,9 @@ impl<UID: Uid> State for ConfigRefresher<UID> {
              longer whitelisted"
         );
 
-        // Peers collected to avoid keeping the mutex lock alive which might lead to deadlock
-        let peers_to_terminate: Vec<_> = unwrap!(self.cm.lock())
+        let peers_to_terminate: Vec<_> = core
+            .user_data()
+            .connections
             .values()
             .filter_map(|cid| {
                 cid.active_connection
@@ -101,7 +89,7 @@ impl<UID: Uid> State for ConfigRefresher<UID> {
                     .and_then(|peer| {
                         let should_drop = {
                             let mut state = peer.borrow_mut();
-                            let ac = match state.as_any().downcast_mut::<ActiveConnection<UID>>() {
+                            let ac = match state.as_any().downcast_mut::<ActiveConnection>() {
                                 Some(ac) => ac,
                                 None => {
                                     warn!(

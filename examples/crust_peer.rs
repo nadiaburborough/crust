@@ -8,46 +8,105 @@
 // Software.
 
 //! Example which runs a Crust node.
+//! You can connect with nodes directly and exchange messages with them.
+//!
+//! ## Use
+//!
+//! 1. `cargo run --example crust_peer`
+//! 2. Type `prepare-connection-info` command and press ENTER. Crust will generate your
+//!    connection information and print it in JSON format.
+//! 3. Repeat the steps 1 and 2 on a remote machine or on localhost but in a different terminal.
+//! 4. Now you should be running Node1 and Node2 instances.
+//! 5. Copy connection information from Node2 and type into Node1, e.g.
+//!
+//!    > connect 0 {"id":[69,179,26,91,30,37,129,181,210,61,9,134,181,74,170,154,33,63,253,237],
+//!    "for_direct":["127.0.0.1:56419","192.168.1.122:56419","172.17.42.1:56419","10.0.0.1:56419",
+//!    "86.100.204.140:43795"],"our_pk":{"encrypt":[240,160,65,141,35,248,81,3,221,127,142,130,113,
+//!    81,191,59,223,134,106,52,250,136,111,244,158,79,18,148,32,125,87,21]}}
+//!
+//!    The second parameter `0` of connect command is our connection information number. Note, we
+//!    can execute `prepare-connection-info` and Crust will create many instances. So this
+//!    parameter specifies which one we're using. We must use a single instance per connection.
+//!
+//!    After you press ENTER you should be presented with a message declaring successful
+//!    connection:
+//!
+//!    > Connected to peer PeerId([255, 1, 11, 129, 240, 47, 25, 225, 183, 51, 93, 187, 205, 123,
+//!      124, 62, 242, 136, 190, 60]) Node count: 1
+//!
+//! 6. Then you can exchange messages with connected peers:
+//!
+//!    > send 0 hello
+//!
+//!    The second parameter of a `send` message `0` is the connection index.
+//!
+//! 7. Type `stop` to exit.
 
 // For explanation of lint checks, run `rustc -W help` or see
 // https://github.com/maidsafe/QA/blob/master/Documentation/Rust%20Lint%20Checks.md
 #![forbid(
-    exceeding_bitshifts, mutable_transmutes, no_mangle_const_items, unknown_crate_types, warnings
+    exceeding_bitshifts,
+    mutable_transmutes,
+    no_mangle_const_items,
+    unknown_crate_types,
+    warnings
 )]
 #![deny(
-    bad_style, deprecated, improper_ctypes, missing_docs, non_shorthand_field_patterns,
-    overflowing_literals, plugin_as_library, private_no_mangle_fns, private_no_mangle_statics,
-    stable_features, unconditional_recursion, unknown_lints, unsafe_code, unused, unused_allocation,
-    unused_attributes, unused_comparisons, unused_features, unused_parens, while_true
+    bad_style,
+    deprecated,
+    improper_ctypes,
+    missing_docs,
+    non_shorthand_field_patterns,
+    overflowing_literals,
+    plugin_as_library,
+    stable_features,
+    unconditional_recursion,
+    unknown_lints,
+    unsafe_code,
+    unused,
+    unused_allocation,
+    unused_attributes,
+    unused_comparisons,
+    unused_features,
+    unused_parens,
+    while_true
 )]
 #![warn(
-    trivial_casts, trivial_numeric_casts, unused_extern_crates, unused_import_braces,
-    unused_qualifications, unused_results
+    trivial_casts,
+    trivial_numeric_casts,
+    unused_extern_crates,
+    unused_import_braces,
+    unused_qualifications,
+    unused_results
 )]
 #![allow(
-    box_pointers, missing_copy_implementations, missing_debug_implementations,
+    box_pointers,
+    missing_copy_implementations,
+    missing_debug_implementations,
     variant_size_differences
 )]
 // FIXME: `needless_pass_by_value` and `clone_on_ref_ptr` required to make no intrusive changes
 // on code in the master branch
-#![cfg_attr(feature = "cargo-clippy", allow(clone_on_ref_ptr, needless_pass_by_value))]
+#![cfg_attr(
+    feature = "cargo-clippy",
+    allow(clone_on_ref_ptr, needless_pass_by_value)
+)]
 
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate serde_derive;
-#[macro_use]
 extern crate unwrap;
-extern crate clap;
-extern crate crust;
-extern crate maidsafe_utilities;
-extern crate rand;
-extern crate serde_json;
+use clap;
+use crust;
+use maidsafe_utilities;
+use rand;
+use serde_json;
 
 use clap::{App, AppSettings, Arg, SubCommand};
 
-use crust::{Config, ConnectionInfoResult, Uid};
-use rand::{Rand, Rng};
+use crust::{Config, ConnectionInfoResult, PeerId, PrivConnectionInfo, Service};
+use rand::Rng;
+use safe_crypto::{gen_encrypt_keypair, gen_sign_keypair, SecretEncryptKey};
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -56,20 +115,6 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct UniqueId([u8; 20]);
-impl Uid for UniqueId {}
-impl Rand for UniqueId {
-    fn rand<R: Rng>(rng: &mut R) -> Self {
-        let mut inner = [0; 20];
-        rng.fill_bytes(&mut inner);
-        UniqueId(inner)
-    }
-}
-
-type PrivConnectionInfo = crust::PrivConnectionInfo<UniqueId>;
-type Service = crust::Service<UniqueId>;
 
 fn generate_random_vec_u8(size: usize) -> Vec<u8> {
     let mut vec: Vec<u8> = Vec::with_capacity(size);
@@ -85,7 +130,7 @@ fn generate_random_vec_u8(size: usize) -> Vec<u8> {
 ///
 /// /////////////////////////////////////////////////////////////////////////////
 struct Network {
-    nodes: HashMap<usize, UniqueId>,
+    nodes: HashMap<usize, PeerId>,
     our_connection_infos: BTreeMap<u32, PrivConnectionInfo>,
     performance_start: Instant,
     performance_interval: Duration,
@@ -137,7 +182,7 @@ impl Network {
         println!();
     }
 
-    pub fn get_peer_id(&self, n: usize) -> Option<&UniqueId> {
+    pub fn get_peer_id(&self, n: usize) -> Option<&PeerId> {
         self.nodes.get(&n)
     }
 
@@ -189,7 +234,7 @@ fn on_time_out(timeout: Duration, flag_speed: bool) -> Sender<bool> {
 fn handle_new_peer(
     service: &Service,
     protected_network: Arc<Mutex<Network>>,
-    peer_id: UniqueId,
+    peer_id: PeerId,
 ) -> usize {
     let mut network = unwrap!(protected_network.lock());
     let peer_index = network.next_peer_index();
@@ -252,7 +297,8 @@ fn main() {
         None
     };
 
-    let mut service = unwrap!(Service::with_config(event_sender, config, rand::random()));
+    let (peer_id, peer_sk) = new_peer_id();
+    let mut service = unwrap!(Service::with_config(event_sender, config, peer_id, peer_sk));
     unwrap!(service.start_listening_tcp());
     service.start_service_discovery();
     let service = Arc::new(Mutex::new(service));
@@ -289,14 +335,14 @@ fn main() {
                                 println!(
                                     "\nReceived from {:?} message: {}",
                                     peer_id,
-                                    String::from_utf8(bytes)
-                                        .unwrap_or_else(|_| {
-                                            format!("non-UTF-8 message of {} bytes", message_length)
-                                        })
+                                    String::from_utf8(bytes).unwrap_or_else(|_| format!(
+                                        "non-UTF-8 message of {} bytes",
+                                        message_length
+                                    ))
                                 );
                             }
                             crust::Event::ConnectionInfoPrepared(result) => {
-                                let ConnectionInfoResult::<UniqueId> {
+                                let ConnectionInfoResult {
                                     result_token,
                                     result,
                                 } = result;
@@ -407,7 +453,8 @@ fn main() {
             unwrap!(
                 matches.value_of("speed"),
                 "Safe due to `running_speed_test` == true"
-            ).parse(),
+            )
+            .parse(),
             "Expected number for <speed>"
         );
         let mut rng = rand::thread_rng();
@@ -577,7 +624,7 @@ fn parse_user_command(cmd: &str) -> Option<UserCommand> {
     unwrap!(app.write_help(&mut help_message));
     let help_message = unwrap!(String::from_utf8(help_message));
     let matches = app.get_matches_from_safe(
-        cmd.trim_right_matches(|c| c == '\r' || c == '\n')
+        cmd.trim_end_matches(|c| c == '\r' || c == '\n')
             .split(' ')
             .collect::<Vec<_>>(),
     );
@@ -607,6 +654,7 @@ fn parse_user_command(cmd: &str) -> Option<UserCommand> {
         let msg = unwrap!(matches.value_of("message"), "Missing message");
         Some(UserCommand::Send(peer, msg.to_string()))
     } else if matches.is_present("send-all") {
+        let matches = unwrap!(matches.subcommand_matches("send-all"));
         let msg = unwrap!(matches.value_of("message"), "Missing message");
         Some(UserCommand::SendAll(msg.to_string()))
     } else if matches.is_present("prepare-connection-info") {
@@ -621,4 +669,14 @@ fn parse_user_command(cmd: &str) -> Option<UserCommand> {
     } else {
         None
     }
+}
+
+fn new_peer_id() -> (PeerId, SecretEncryptKey) {
+    let (enc_pk, enc_sk) = gen_encrypt_keypair();
+    let (sign_pk, _sign_sk) = gen_sign_keypair();
+    let id = PeerId {
+        pub_sign_key: sign_pk,
+        pub_enc_key: enc_pk,
+    };
+    (id, enc_sk)
 }

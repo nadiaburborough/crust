@@ -10,31 +10,19 @@
 pub use self::core::{spawn_event_loop, Core, CoreMessage, CoreTimer, EventLoop};
 pub use self::error::CommonError;
 pub use self::message::{BootstrapDenyReason, Message};
-pub use self::socket::Socket;
 pub use self::state::State;
-use serde::de::DeserializeOwned;
-use serde::ser::Serialize;
-use std::fmt;
-use std::hash::Hash;
-use std::net::SocketAddr;
+use safe_crypto::PublicEncryptKey;
+use std::collections::HashSet;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 pub const HASH_SIZE: usize = 32;
 pub type NameHash = [u8; HASH_SIZE];
-/// Priority of a message to be sent by Crust. A lower value means a higher priority, so Priority 0
-/// is the highest one. Low-priority messages will be preempted if need be to allow higher priority
-/// messages through. Messages with a value `>= MSG_DROP_PRIORITY` will even be dropped, if
-/// bandwidth is insufficient.
-pub type Priority = u8;
 pub type Result<T> = ::std::result::Result<T, CommonError>;
-
-pub const MAX_PAYLOAD_SIZE: usize = 2 * 1024 * 1024;
-/// Minimum priority for droppable messages. Messages with lower values will never be dropped.
-pub const MSG_DROP_PRIORITY: u8 = 2;
 
 /// Specify crust user. Behaviour (for example in bootstrap phase) will be different for different
 /// variants. Node will request the Bootstrapee to connect back to this crust failing which it
 /// would mean it's not reachable from outside and hence should be rejected bootstrap attempts.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CrustUser {
     /// Crust user is a Node and should not be allowed to bootstrap if it's not reachable from
     /// outside.
@@ -44,31 +32,49 @@ pub enum CrustUser {
     Client,
 }
 
+/// Corresponds to `CrustUser` roles and additionally include public endpoints to test for
+/// external reachability.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ExternalReachability {
-    NotRequired,
-    Required { direct_listeners: Vec<SocketAddr> },
+pub enum BootstrapperRole {
+    /// `Node` peers are usually requested to be externally reachable, hence include their
+    /// public endpoints.
+    Node(HashSet<SocketAddr>),
+    /// `Client` peers don't include any addresses, because they are never tested for external
+    /// reachability.
+    Client,
 }
 
-/// Trait for specifying a unique identifier for a Crust peer
-pub trait Uid:
-    'static
-    + Send
-    + fmt::Debug
-    + Clone
-    + Copy
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Hash
-    + Serialize
-    + DeserializeOwned
-{
+impl From<&BootstrapperRole> for CrustUser {
+    fn from(role: &BootstrapperRole) -> CrustUser {
+        match role {
+            BootstrapperRole::Node(_) => CrustUser::Node,
+            BootstrapperRole::Client => CrustUser::Client,
+        }
+    }
+}
+
+/// Information necessary to connect to peer.
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// Peer public address.
+    pub addr: SocketAddr,
+    /// Peer public key.
+    pub pub_key: PublicEncryptKey,
+}
+
+impl PeerInfo {
+    /// Constructs peer info.
+    pub fn new(addr: SocketAddr, pub_key: PublicEncryptKey) -> Self {
+        Self { addr, pub_key }
+    }
+}
+
+/// A convevience method to build IPv4 address with a port number.
+pub fn ipv4_addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
 }
 
 mod core;
 mod error;
 mod message;
-mod socket;
 mod state;

@@ -7,12 +7,12 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::{self, CoreMessage};
+use crate::nat;
+use crate::{common, service_discovery};
 use config_file_handler;
 use maidsafe_utilities::serialisation::SerialisationError;
-use mio;
-use nat;
-use service_discovery;
+use safe_crypto;
+use socket_collection::SocketError;
 use std::io;
 use std::sync::mpsc;
 
@@ -64,12 +64,9 @@ quick_error! {
             description("Common module error")
             from()
         }
-        /// CoreMsg send error
-        CoreMsgTx(e: mio::channel::SendError<CoreMessage>) {
-            description(e.description())
-            display("CoreMessage send error: {}", e)
-            cause(e)
-            from()
+        /// CoreMessage send error
+        CoreMsgTx {
+            display("CoreMessage channel was destroyed")
         }
         /// Peer not found
         PeerNotFound {
@@ -91,6 +88,18 @@ quick_error! {
         ListenerNotIntialised {
             description("Listener is not initialised yet")
             display("Listener is not initialised yet")
+        }
+        /// `socket-collection` error
+        SocketError(e: SocketError) {
+            display("Socket error: {}", e)
+            cause(e)
+            from()
+        }
+        /// Crypto error.
+        Crypto(e: safe_crypto::Error) {
+            display("Crypto error: {}", e)
+            cause(e)
+            from()
         }
     }
 }

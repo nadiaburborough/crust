@@ -7,10 +7,12 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
+use crate::common::PeerInfo;
+use crate::main::BootstrapCacheConfig;
 use config_file_handler::{self, FileHandler};
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 #[cfg(test)]
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Direct contacts one should connect to
-    pub hard_coded_contacts: Vec<SocketAddr>,
+    pub hard_coded_contacts: Vec<PeerInfo>,
     /// Port for TCP acceptor
     pub tcp_acceptor_port: Option<u16>,
     /// Force usage of `tcp_acceptor_port` as our router mapped port. Normally if there is a port
@@ -33,10 +35,14 @@ pub struct Config {
     /// can specify this value as true, which will force crust to add the above `tcp_acceptor_port`
     /// to one of our externally reachable endpoint.
     pub force_acceptor_port_in_ext_ep: bool,
-    /// Port for service discovery on local network
+    /// Port for service discovery on local network. This port is used to broadcast messages to.
     pub service_discovery_port: Option<u16>,
-    /// File for bootstrap cache
-    pub bootstrap_cache_name: Option<String>,
+    /// You can configure service discovery server to listen on a separate port. This becomes
+    /// useful when you want to run multiple instances of Crust on the same machine.
+    /// By default it will use the same as `service_discovery_port` value.
+    pub service_discovery_listener_port: Option<u16>,
+    /// Bootstrap cache specific settings.
+    pub bootstrap_cache: BootstrapCacheConfig,
     /// Whitelisted nodes who are allowed to bootstrap off us or to connect to us
     pub whitelisted_node_ips: Option<HashSet<IpAddr>>,
     /// Whitelisted clients who are allowed to bootstrap off us
@@ -46,15 +52,6 @@ pub struct Config {
     /// This is a mechanism to prevent nodes from different decentralized
     /// networks to connect to each other (issue #209)
     pub network_name: Option<String>,
-    /// Optional developer configuration
-    pub dev: Option<DevConfig>,
-}
-
-/// Developer options
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Clone, Default)]
-pub struct DevConfig {
-    /// If `true`, then the mandatory external reachability test is disabled.
-    pub disable_external_reachability_requirement: bool,
 }
 
 impl Default for Config {
@@ -64,17 +61,17 @@ impl Default for Config {
             tcp_acceptor_port: None,
             force_acceptor_port_in_ext_ep: false,
             service_discovery_port: None,
-            bootstrap_cache_name: None,
+            service_discovery_listener_port: None,
+            bootstrap_cache: Default::default(),
             whitelisted_node_ips: None,
             whitelisted_client_ips: None,
             network_name: None,
-            dev: None,
         }
     }
 }
 
 /// Reads the default crust config file.
-pub fn read_config_file() -> ::Res<Config> {
+pub fn read_config_file() -> crate::Res<Config> {
     let file_handler = FileHandler::new(&get_file_name()?, false)?;
     let cfg = file_handler.read_file()?;
     Ok(cfg)
@@ -89,7 +86,7 @@ pub fn read_config_file() -> ::Res<Config> {
 /// this file should be created by the installer for the dependent application.
 #[cfg(test)]
 #[allow(dead_code)]
-pub fn write_config_file(hard_coded_contacts: Option<Vec<SocketAddr>>) -> ::Res<PathBuf> {
+pub fn write_config_file(hard_coded_contacts: Option<Vec<PeerInfo>>) -> crate::Res<PathBuf> {
     use serde_json;
     use std::io::Write;
 
@@ -111,7 +108,7 @@ pub fn write_config_file(hard_coded_contacts: Option<Vec<SocketAddr>>) -> ::Res<
     Ok(config_path)
 }
 
-fn get_file_name() -> ::Res<OsString> {
+fn get_file_name() -> crate::Res<OsString> {
     let mut name = config_file_handler::exe_file_stem()?;
     name.push(".crust.config");
     Ok(name)

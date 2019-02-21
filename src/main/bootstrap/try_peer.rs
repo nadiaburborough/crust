@@ -7,51 +7,57 @@
 // specific language governing permissions and limitations relating to use of the SAFE Network
 // Software.
 
-use common::{
-    BootstrapDenyReason, Core, ExternalReachability, Message, NameHash, Priority, Socket, State,
-    Uid,
-};
+use crate::common::{BootstrapDenyReason, BootstrapperRole, Message, NameHash, PeerInfo, State};
+use crate::main::{CrustData, EventLoopCore};
+use crate::PeerId;
 use mio::{Poll, PollOpt, Ready, Token};
+use safe_crypto::{SecretEncryptKey, SharedSecretKey};
+use socket_collection::{DecryptContext, EncryptContext, Priority, TcpSock};
 use std::any::Any;
 use std::cell::RefCell;
 use std::mem;
-use std::net::SocketAddr;
 use std::rc::Rc;
 
-pub type Finish<UID> = Box<
+pub type Finish = Box<
     FnMut(
-        &mut Core,
+        &mut EventLoopCore,
         &Poll,
         Token,
-        Result<(Socket, SocketAddr, UID), (SocketAddr, Option<BootstrapDenyReason>)>,
+        Result<(TcpSock, PeerInfo, PeerId), (PeerInfo, Option<BootstrapDenyReason>)>,
     ),
 >;
 
-pub struct TryPeer<UID: Uid> {
+/// Sends bootstrap request to a one specific address and waits for response.
+pub struct TryPeer {
     token: Token,
-    peer: SocketAddr,
-    socket: Socket,
-    request: Option<(Message<UID>, Priority)>,
-    finish: Finish<UID>,
+    peer: PeerInfo,
+    socket: TcpSock,
+    request: Option<(Message, Priority)>,
+    finish: Finish,
+    shared_key: SharedSecretKey,
 }
 
-impl<UID: Uid> TryPeer<UID> {
+impl TryPeer {
     pub fn start(
-        core: &mut Core,
+        core: &mut EventLoopCore,
         poll: &Poll,
-        peer: SocketAddr,
-        our_uid: UID,
+        peer: PeerInfo,
+        our_uid: PeerId,
         name_hash: NameHash,
-        ext_reachability: ExternalReachability,
-        finish: Finish<UID>,
-    ) -> ::Res<Token> {
-        let socket = Socket::connect(&peer)?;
+        our_role: BootstrapperRole,
+        our_sk: &SecretEncryptKey,
+        finish: Finish,
+    ) -> crate::Res<Token> {
+        let mut socket = TcpSock::connect(&peer.addr)?;
+        socket.set_encrypt_ctx(EncryptContext::anonymous_encrypt(peer.pub_key))?;
+        let shared_key = our_sk.shared_secret(&peer.pub_key);
+        socket.set_decrypt_ctx(DecryptContext::authenticated(shared_key.clone()))?;
         let token = core.get_new_token();
 
         poll.register(
             &socket,
             token,
-            Ready::error() | Ready::hup() | Ready::writable(),
+            Ready::writable() | Ready::readable(),
             PollOpt::edge(),
         )?;
 
@@ -59,11 +65,9 @@ impl<UID: Uid> TryPeer<UID> {
             token,
             peer,
             socket,
-            request: Some((
-                Message::BootstrapRequest(our_uid, name_hash, ext_reachability),
-                0,
-            )),
+            request: Some((Message::BootstrapRequest(our_uid, name_hash, our_role), 0)),
             finish,
+            shared_key,
         };
 
         let _ = core.insert_state(token, Rc::new(RefCell::new(state)));
@@ -71,20 +75,30 @@ impl<UID: Uid> TryPeer<UID> {
         Ok(token)
     }
 
-    fn write(&mut self, core: &mut Core, poll: &Poll, msg: Option<(Message<UID>, Priority)>) {
-        if self.socket.write(poll, self.token, msg).is_err() {
+    fn write(&mut self, core: &mut EventLoopCore, poll: &Poll, msg: Option<(Message, Priority)>) {
+        if self.socket.write(msg).is_err() {
             self.handle_error(core, poll, None);
         }
     }
 
-    fn read(&mut self, core: &mut Core, poll: &Poll) {
-        match self.socket.read::<Message<UID>>() {
+    fn read(&mut self, core: &mut EventLoopCore, poll: &Poll) {
+        match self.socket.read::<Message>() {
             Ok(Some(Message::BootstrapGranted(peer_uid))) => {
                 let _ = core.remove_state(self.token);
                 let token = self.token;
-                let socket = mem::replace(&mut self.socket, Socket::default());
-                let data = (socket, self.peer, peer_uid);
-                (*self.finish)(core, poll, token, Ok(data));
+
+                let mut socket = mem::replace(&mut self.socket, Default::default());
+                match socket.set_encrypt_ctx(EncryptContext::authenticated(self.shared_key.clone()))
+                {
+                    Ok(_) => {
+                        let data = (socket, self.peer, peer_uid);
+                        (*self.finish)(core, poll, token, Ok(data));
+                    }
+                    Err(e) => {
+                        debug!("Failed to set socket encrypt context: {}", e);
+                        self.handle_error(core, poll, None);
+                    }
+                }
             }
             Ok(Some(Message::BootstrapDenied(reason))) => {
                 self.handle_error(core, poll, Some(reason))
@@ -94,19 +108,20 @@ impl<UID: Uid> TryPeer<UID> {
         }
     }
 
-    fn handle_error(&mut self, core: &mut Core, poll: &Poll, reason: Option<BootstrapDenyReason>) {
+    fn handle_error(
+        &mut self,
+        core: &mut EventLoopCore,
+        poll: &Poll,
+        reason: Option<BootstrapDenyReason>,
+    ) {
         self.terminate(core, poll);
-        let token = self.token;
-        let peer = self.peer;
-        (*self.finish)(core, poll, token, Err((peer, reason)));
+        (*self.finish)(core, poll, self.token, Err((self.peer, reason)));
     }
 }
 
-impl<UID: Uid> State for TryPeer<UID> {
-    fn ready(&mut self, core: &mut Core, poll: &Poll, kind: Ready) {
-        if kind.is_error() {
-            return self.handle_error(core, poll, None);
-        } else if kind.is_writable() || kind.is_readable() {
+impl State<CrustData> for TryPeer {
+    fn ready(&mut self, core: &mut EventLoopCore, poll: &Poll, kind: Ready) {
+        if kind.is_writable() || kind.is_readable() {
             if kind.is_writable() {
                 let req = self.request.take();
                 self.write(core, poll, req);
@@ -118,13 +133,13 @@ impl<UID: Uid> State for TryPeer<UID> {
         }
 
         debug!(
-            "Considering the following event to indicate dirupted connection: {:?}",
+            "Considering the following event to indicate disrupted connection: {:?}",
             kind
         );
         self.handle_error(core, poll, None);
     }
 
-    fn terminate(&mut self, core: &mut Core, poll: &Poll) {
+    fn terminate(&mut self, core: &mut EventLoopCore, poll: &Poll) {
         let _ = core.remove_state(self.token);
         let _ = poll.deregister(&self.socket);
     }
